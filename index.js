@@ -1,7 +1,6 @@
 /**
- * Complete Email HTML Fetcher Middleware
- * Uses proper authentication for Gmail, Outlook, Yahoo
- * Working and tested
+ * Optimized Email HTML Fetcher - FAST VERSION
+ * Fixes timeout issues by searching smarter and faster
  */
 
 const express = require('express');
@@ -11,12 +10,18 @@ const cors = require('cors');
 
 const app = express();
 
-// Enable CORS
+// Increase timeout for all routes
+app.use((req, res, next) => {
+    req.setTimeout(120000); // 2 minutes
+    res.setTimeout(120000); // 2 minutes
+    next();
+});
+
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// IMAP Configuration for each provider
+// IMAP Configuration
 const getImapConfig = (provider, username, password) => {
     const configs = {
         gmail: {
@@ -26,11 +31,10 @@ const getImapConfig = (provider, username, password) => {
             port: 993,
             tls: true,
             tlsOptions: { 
-                rejectUnauthorized: false,
-                servername: 'imap.gmail.com'
+                rejectUnauthorized: false
             },
-            connTimeout: 30000,
-            authTimeout: 30000
+            authTimeout: 15000,
+            connTimeout: 15000
         },
         outlook: {
             user: username,
@@ -39,11 +43,10 @@ const getImapConfig = (provider, username, password) => {
             port: 993,
             tls: true,
             tlsOptions: { 
-                rejectUnauthorized: false,
-                servername: 'outlook.office365.com'
+                rejectUnauthorized: false
             },
-            connTimeout: 30000,
-            authTimeout: 30000
+            authTimeout: 15000,
+            connTimeout: 15000
         },
         yahoo: {
             user: username,
@@ -52,11 +55,10 @@ const getImapConfig = (provider, username, password) => {
             port: 993,
             tls: true,
             tlsOptions: { 
-                rejectUnauthorized: false,
-                servername: 'imap.mail.yahoo.com'
+                rejectUnauthorized: false
             },
-            connTimeout: 30000,
-            authTimeout: 30000
+            authTimeout: 15000,
+            connTimeout: 15000
         }
     };
     
@@ -64,48 +66,55 @@ const getImapConfig = (provider, username, password) => {
 };
 
 /**
- * Main endpoint - Fetch email by subject
+ * Main endpoint - OPTIMIZED
  */
 app.post('/fetch-email', async (req, res) => {
+    const startTime = Date.now();
     console.log('='.repeat(60));
-    console.log('New request received:', new Date().toISOString());
-    console.log('Body:', JSON.stringify(req.body, null, 2));
+    console.log('📨 Request received:', new Date().toISOString());
     
     try {
         const { provider, username, password, subject } = req.body;
         
-        // Validate input
+        // Validate
         if (!provider || !username || !password || !subject) {
-            console.log('❌ Missing required fields');
             return res.status(400).json({
                 success: false,
-                error: 'Missing required fields',
-                required: ['provider', 'username', 'password', 'subject']
+                error: 'Missing required fields'
             });
         }
         
-        // Get IMAP config
+        console.log('Provider:', provider);
+        console.log('Username:', username);
+        console.log('Subject search:', subject);
+        
         const imapConfig = getImapConfig(provider, username, password);
         
         if (!imapConfig) {
-            console.log('❌ Invalid provider:', provider);
             return res.status(400).json({
                 success: false,
-                error: 'Invalid provider. Use: gmail, outlook, or yahoo'
+                error: 'Invalid provider'
             });
         }
         
-        console.log('✅ Configuration loaded for:', provider);
-        console.log('📧 Searching for subject:', subject);
+        // Set longer timeout for this specific request
+        req.setTimeout(120000);
+        res.setTimeout(120000);
         
-        // Fetch email
-        const email = await fetchEmailBySubject(imapConfig, subject);
+        console.log('🔌 Starting email fetch...');
+        
+        // Fetch email with timeout
+        const email = await Promise.race([
+            fetchEmailBySubjectOptimized(imapConfig, subject),
+            new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Search timeout - taking too long')), 90000)
+            )
+        ]);
+        
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`✅ Completed in ${duration}s`);
         
         if (email) {
-            console.log('✅ Email found successfully');
-            console.log('Subject:', email.subject);
-            console.log('HTML length:', email.html ? email.html.length : 0);
-            
             res.json({
                 success: true,
                 data: {
@@ -115,163 +124,217 @@ app.post('/fetch-email', async (req, res) => {
                     date: email.date,
                     html: email.html,
                     text: email.text
+                },
+                meta: {
+                    duration_seconds: duration
                 }
             });
         } else {
-            console.log('❌ Email not found');
             res.status(404).json({
                 success: false,
                 error: 'Email not found',
-                message: `No email found with subject containing: "${subject}"`
+                message: `No email with subject containing: "${subject}"`
             });
         }
         
     } catch (error) {
         console.error('❌ Error:', error.message);
-        console.error('Stack:', error.stack);
+        
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        
+        // Handle specific errors
+        if (error.message.includes('timeout')) {
+            return res.status(408).json({
+                success: false,
+                error: 'Request timeout',
+                message: 'Email search took too long. Try a more specific subject.',
+                duration_seconds: duration
+            });
+        }
+        
+        if (error.message.includes('LOGIN failed') || error.message.includes('Invalid credentials')) {
+            let help = 'Check your credentials. ';
+            if (req.body.provider === 'gmail') {
+                help += 'Gmail requires App Password: https://myaccount.google.com/apppasswords';
+            } else if (req.body.provider === 'outlook') {
+                help += 'Outlook requires App Password: https://account.microsoft.com/security';
+            }
+            
+            return res.status(401).json({
+                success: false,
+                error: 'Authentication failed',
+                help: help
+            });
+        }
         
         res.status(500).json({
             success: false,
-            error: 'Server error',
-            message: error.message
+            error: error.message
         });
     }
 });
 
 /**
- * Fetch email by subject from IMAP
+ * OPTIMIZED: Faster email search
+ * Searches most recent emails first, stops when found
  */
-function fetchEmailBySubject(imapConfig, searchSubject) {
+function fetchEmailBySubjectOptimized(imapConfig, searchSubject) {
     return new Promise((resolve, reject) => {
         console.log('🔌 Connecting to IMAP...');
         
         const imap = new Imap(imapConfig);
         let foundEmail = null;
-        let searchComplete = false;
+        
+        // Timeout handler
+        const timeout = setTimeout(() => {
+            if (!foundEmail) {
+                console.log('⏰ Search timeout');
+                imap.end();
+                reject(new Error('Search timeout'));
+            }
+        }, 85000); // 85 seconds
         
         imap.once('ready', () => {
-            console.log('✅ IMAP connected successfully');
+            console.log('✅ Connected');
             
             imap.openBox('INBOX', true, (err, box) => {
                 if (err) {
-                    console.error('❌ Failed to open INBOX:', err.message);
+                    clearTimeout(timeout);
                     reject(err);
                     return;
                 }
                 
                 console.log('📬 INBOX opened');
-                console.log('Total messages:', box.messages.total);
+                console.log('📊 Total messages:', box.messages.total);
                 
                 if (box.messages.total === 0) {
-                    console.log('📭 Inbox is empty');
+                    clearTimeout(timeout);
                     imap.end();
                     resolve(null);
                     return;
                 }
                 
-                // Search all messages
-                imap.search(['ALL'], (err, results) => {
-                    if (err) {
-                        console.error('❌ Search failed:', err.message);
-                        reject(err);
-                        return;
-                    }
+                // OPTIMIZATION: Search recent emails first (last 50)
+                const total = box.messages.total;
+                const startSeq = Math.max(1, total - 49); // Last 50 emails
+                const endSeq = total;
+                
+                console.log(`🔍 Searching last 50 emails (${startSeq}:${endSeq})...`);
+                
+                // Fetch recent emails
+                const f = imap.seq.fetch(`${startSeq}:${endSeq}`, {
+                    bodies: 'HEADER.FIELDS (SUBJECT FROM DATE)',
+                    struct: false
+                });
+                
+                let candidates = [];
+                let headersProcessed = 0;
+                
+                // First pass: Just check headers (FAST)
+                f.on('message', (msg, seqno) => {
+                    msg.on('body', (stream, info) => {
+                        let buffer = '';
+                        stream.on('data', chunk => buffer += chunk.toString('utf8'));
+                        stream.once('end', () => {
+                            headersProcessed++;
+                            
+                            const header = Imap.parseHeader(buffer);
+                            const emailSubject = header.subject ? header.subject[0] : '';
+                            
+                            if (emailSubject.toLowerCase().includes(searchSubject.toLowerCase())) {
+                                console.log(`✅ Match found: "${emailSubject}"`);
+                                candidates.push(seqno);
+                            }
+                            
+                            // Progress
+                            if (headersProcessed % 10 === 0) {
+                                console.log(`⏳ Checked ${headersProcessed}/50 headers...`);
+                            }
+                        });
+                    });
+                });
+                
+                f.once('error', (err) => {
+                    clearTimeout(timeout);
+                    reject(err);
+                });
+                
+                f.once('end', () => {
+                    console.log(`✅ Header scan complete. ${candidates.length} matches found.`);
                     
-                    if (!results || results.length === 0) {
-                        console.log('📭 No messages found');
+                    if (candidates.length === 0) {
+                        clearTimeout(timeout);
                         imap.end();
                         resolve(null);
                         return;
                     }
                     
-                    console.log(`🔍 Searching ${results.length} messages...`);
+                    // Second pass: Fetch full body of FIRST match only (FAST)
+                    console.log('📥 Fetching full email body...');
                     
-                    let processed = 0;
-                    const totalMessages = results.length;
-                    
-                    const f = imap.fetch(results, {
+                    const f2 = imap.seq.fetch(candidates[0] + ':' + candidates[0], {
                         bodies: '',
                         markSeen: false
                     });
                     
-                    f.on('message', (msg, seqno) => {
-                        msg.on('body', (stream, info) => {
-                            simpleParser(stream, async (err, parsed) => {
+                    f2.on('message', (msg) => {
+                        msg.on('body', (stream) => {
+                            simpleParser(stream, (err, parsed) => {
                                 if (err) {
-                                    console.error('⚠️ Parse error:', err.message);
+                                    clearTimeout(timeout);
+                                    reject(err);
                                     return;
                                 }
                                 
-                                processed++;
+                                let htmlContent = parsed.html || '';
                                 
-                                const emailSubject = parsed.subject || '';
-                                const matchFound = emailSubject.toLowerCase().includes(searchSubject.toLowerCase());
-                                
-                                if (matchFound && !foundEmail) {
-                                    console.log(`✅ MATCH FOUND!`);
-                                    console.log(`   Subject: ${emailSubject}`);
-                                    
-                                    let htmlContent = parsed.html || '';
-                                    
-                                    // If no HTML, create simple HTML from text
-                                    if (!htmlContent && parsed.text) {
-                                        htmlContent = `<!DOCTYPE html>
+                                if (!htmlContent && parsed.text) {
+                                    htmlContent = `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"></head>
 <body style="font-family: Arial, sans-serif; padding: 20px; line-height: 1.6;">
-<pre style="white-space: pre-wrap; word-wrap: break-word;">${parsed.text}</pre>
+<pre style="white-space: pre-wrap;">${parsed.text}</pre>
 </body>
 </html>`;
-                                    }
-                                    
-                                    foundEmail = {
-                                        subject: emailSubject,
-                                        from: parsed.from ? parsed.from.text : 'Unknown',
-                                        to: parsed.to ? parsed.to.text : '',
-                                        date: parsed.date ? parsed.date.toISOString() : new Date().toISOString(),
-                                        html: htmlContent,
-                                        text: parsed.text || ''
-                                    };
                                 }
                                 
-                                // Log progress
-                                if (processed % 10 === 0 || processed === totalMessages) {
-                                    console.log(`⏳ Progress: ${processed}/${totalMessages}`);
-                                }
+                                foundEmail = {
+                                    subject: parsed.subject || '',
+                                    from: parsed.from ? parsed.from.text : '',
+                                    to: parsed.to ? parsed.to.text : '',
+                                    date: parsed.date ? parsed.date.toISOString() : new Date().toISOString(),
+                                    html: htmlContent,
+                                    text: parsed.text || ''
+                                };
                                 
-                                // If we've processed all and found something, end early
-                                if (foundEmail && !searchComplete) {
-                                    searchComplete = true;
-                                    console.log('🎯 Email found, closing connection...');
-                                    imap.end();
-                                }
+                                clearTimeout(timeout);
+                                imap.end();
                             });
                         });
                     });
                     
-                    f.once('error', (err) => {
-                        console.error('❌ Fetch error:', err.message);
+                    f2.once('error', (err) => {
+                        clearTimeout(timeout);
                         reject(err);
-                    });
-                    
-                    f.once('end', () => {
-                        console.log('✅ Fetch complete');
-                        if (!searchComplete) {
-                            searchComplete = true;
-                            imap.end();
-                        }
                     });
                 });
             });
         });
         
         imap.once('error', (err) => {
+            clearTimeout(timeout);
             console.error('❌ IMAP error:', err.message);
-            reject(err);
+            
+            if (err.message.includes('Invalid credentials') || err.message.includes('LOGIN failed')) {
+                reject(new Error('LOGIN failed - Invalid credentials or App Password required'));
+            } else {
+                reject(err);
+            }
         });
         
         imap.once('end', () => {
-            console.log('🔌 IMAP connection closed');
+            console.log('🔌 Connection closed');
+            clearTimeout(timeout);
             resolve(foundEmail);
         });
         
@@ -285,9 +348,8 @@ function fetchEmailBySubject(imapConfig, searchSubject) {
 app.get('/health', (req, res) => {
     res.json({
         status: 'OK',
-        timestamp: new Date().toISOString(),
-        service: 'Email HTML Fetcher',
-        version: '3.0.0'
+        version: '3.2.0 - Optimized',
+        timestamp: new Date().toISOString()
     });
 });
 
@@ -296,68 +358,65 @@ app.get('/health', (req, res) => {
  */
 app.get('/', (req, res) => {
     res.json({
-        name: 'Email HTML Fetcher API',
-        version: '3.0.0',
+        name: 'Email HTML Fetcher API - Optimized',
+        version: '3.2.0',
         status: 'Running',
+        optimizations: [
+            'Searches last 50 emails only (faster)',
+            'Header-only scan first (quick match)',
+            'Fetches full body only for matches',
+            'Extended timeouts (2 minutes)',
+            'Early termination when found'
+        ],
         endpoints: {
-            '/': 'API documentation (this page)',
+            '/': 'API documentation',
             '/health': 'Health check',
-            '/fetch-email': 'Fetch email by subject (POST)'
+            '/fetch-email': 'Fetch email (POST)'
         },
         usage: {
             method: 'POST',
             endpoint: '/fetch-email',
             body: {
                 provider: 'gmail | outlook | yahoo',
-                username: 'your.email@example.com',
-                password: 'your-password',
-                subject: 'email subject to search'
-            },
-            example: {
-                provider: 'gmail',
-                username: 'user@gmail.com',
-                password: 'your-password',
-                subject: 'Welcome'
+                username: 'your@email.com',
+                password: 'app-password',
+                subject: 'email subject'
             }
         },
-        note: 'For Gmail/Yahoo, you may need to enable "Less secure app access" or use App Passwords if 2FA is enabled'
+        important: {
+            gmail: 'Requires App Password: https://myaccount.google.com/apppasswords',
+            outlook: 'Requires App Password: https://account.microsoft.com/security',
+            yahoo: 'Requires App Password: https://login.yahoo.com/account/security'
+        }
     });
 });
 
-// 404 handler
+// 404
 app.use((req, res) => {
-    console.log('❌ 404 - Route not found:', req.method, req.path);
     res.status(404).json({
-        success: false,
-        error: '404 - Route not found',
-        available_routes: ['GET /', 'GET /health', 'POST /fetch-email']
-    });
-});
-
-// Error handler
-app.use((err, req, res, next) => {
-    console.error('❌ Unhandled error:', err);
-    res.status(500).json({
-        success: false,
-        error: 'Internal server error',
-        message: err.message
+        error: '404 - Not found',
+        available: ['GET /', 'GET /health', 'POST /fetch-email']
     });
 });
 
 // Start server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     console.log('='.repeat(60));
-    console.log('✅ Email HTML Fetcher API Started');
+    console.log('✅ Email Fetcher API - OPTIMIZED VERSION');
     console.log('='.repeat(60));
     console.log(`🌍 Port: ${PORT}`);
-    console.log(`📡 Endpoints:`);
-    console.log(`   GET  /         - API documentation`);
-    console.log(`   GET  /health   - Health check`);
-    console.log(`   POST /fetch-email - Fetch email by subject`);
+    console.log('⚡ Optimizations:');
+    console.log('   - Searches last 50 emails only');
+    console.log('   - Header scan first (fast)');
+    console.log('   - Full fetch only when matched');
+    console.log('   - 2-minute timeout limit');
     console.log('='.repeat(60));
-    console.log(`📝 Ready to accept requests...`);
+    console.log('📝 Ready for requests...');
     console.log('='.repeat(60));
 });
+
+// Set server timeout to 2 minutes
+server.timeout = 120000;
 
 module.exports = app;

@@ -181,103 +181,68 @@ app.post('/fetch-email', async (req, res) => {
 function fetchEmailBySubjectOptimized(imapConfig, searchSubject) {
     return new Promise((resolve, reject) => {
         console.log('🔌 Connecting to IMAP...');
-        
+
         const imap = new Imap(imapConfig);
         let foundEmail = null;
-        
-        // Timeout handler
+
         const timeout = setTimeout(() => {
             if (!foundEmail) {
                 console.log('⏰ Search timeout');
                 imap.end();
                 reject(new Error('Search timeout'));
             }
-        }, 85000); // 85 seconds
-        
+        }, 85000);
+
         imap.once('ready', () => {
             console.log('✅ Connected');
-            
+
             imap.openBox('INBOX', true, (err, box) => {
                 if (err) {
                     clearTimeout(timeout);
                     reject(err);
                     return;
                 }
-                
+
                 console.log('📬 INBOX opened');
                 console.log('📊 Total messages:', box.messages.total);
-                
+
                 if (box.messages.total === 0) {
                     clearTimeout(timeout);
                     imap.end();
                     resolve(null);
                     return;
                 }
-                
-                // OPTIMIZATION: Search recent emails first (last 50)
-                const total = box.messages.total;
-                const startSeq = Math.max(1, total - 49); // Last 50 emails
-                const endSeq = total;
-                
-                console.log(`🔍 Searching last 50 emails (${startSeq}:${endSeq})...`);
-                
-                // Fetch recent emails
-                const f = imap.seq.fetch(`${startSeq}:${endSeq}`, {
-                    bodies: 'HEADER.FIELDS (SUBJECT FROM DATE)',
-                    struct: false
-                });
-                
-                let candidates = [];
-                let headersProcessed = 0;
-                
-                // First pass: Just check headers (FAST)
-                f.on('message', (msg, seqno) => {
-                    msg.on('body', (stream, info) => {
-                        let buffer = '';
-                        stream.on('data', chunk => buffer += chunk.toString('utf8'));
-                        stream.once('end', () => {
-                            headersProcessed++;
-                            
-                            const header = Imap.parseHeader(buffer);
-                            const emailSubject = header.subject ? header.subject[0] : '';
-                            
-                            if (emailSubject.toLowerCase().includes(searchSubject.toLowerCase())) {
-                                console.log(`✅ Match found: "${emailSubject}"`);
-                                candidates.push(seqno);
-                            }
-                            
-                            // Progress
-                            if (headersProcessed % 10 === 0) {
-                                console.log(`⏳ Checked ${headersProcessed}/50 headers...`);
-                            }
-                        });
-                    });
-                });
-                
-                f.once('error', (err) => {
-                    clearTimeout(timeout);
-                    reject(err);
-                });
-                
-                f.once('end', () => {
-                    console.log(`✅ Header scan complete. ${candidates.length} matches found.`);
-                    
-                    if (candidates.length === 0) {
+
+                // CHANGE: Use IMAP SEARCH with SUBJECT filter (much faster!)
+                console.log(`🔍 Searching for subject: "${searchSubject}"...`);
+
+                imap.search(['ALL', ['SUBJECT', searchSubject]], (err, results) => {
+                    if (err) {
+                        clearTimeout(timeout);
+                        reject(err);
+                        return;
+                    }
+
+                    console.log(`✅ Found ${results.length} matching emails`);
+
+                    if (results.length === 0) {
                         clearTimeout(timeout);
                         imap.end();
                         resolve(null);
                         return;
                     }
-                    
-                    // Second pass: Fetch full body of FIRST match only (FAST)
-                    console.log('📥 Fetching full email body...');
-                    
-                    const f2 = imap.seq.fetch(candidates[0] + ':' + candidates[0], {
+
+                    // Get the MOST RECENT match (last in array)
+                    const targetUid = results[results.length - 1];
+
+                    console.log(`📥 Fetching email UID ${targetUid}...`);
+
+                    const f = imap.fetch(targetUid, {
                         bodies: '',
                         markSeen: false
                     });
-                    
-                    f2.on('message', (msg) => {
+
+                    f.on('message', (msg) => {
                         msg.on('body', (stream) => {
                             simpleParser(stream, (err, parsed) => {
                                 if (err) {
@@ -285,9 +250,9 @@ function fetchEmailBySubjectOptimized(imapConfig, searchSubject) {
                                     reject(err);
                                     return;
                                 }
-                                
+
                                 let htmlContent = parsed.html || '';
-                                
+
                                 if (!htmlContent && parsed.text) {
                                     htmlContent = `<!DOCTYPE html>
 <html>
@@ -297,7 +262,7 @@ function fetchEmailBySubjectOptimized(imapConfig, searchSubject) {
 </body>
 </html>`;
                                 }
-                                
+
                                 foundEmail = {
                                     subject: parsed.subject || '',
                                     from: parsed.from ? parsed.from.text : '',
@@ -306,42 +271,42 @@ function fetchEmailBySubjectOptimized(imapConfig, searchSubject) {
                                     html: htmlContent,
                                     text: parsed.text || ''
                                 };
-                                
+
+                                console.log('✅ Email fetched successfully');
                                 clearTimeout(timeout);
                                 imap.end();
                             });
                         });
                     });
-                    
-                    f2.once('error', (err) => {
+
+                    f.once('error', (err) => {
                         clearTimeout(timeout);
                         reject(err);
                     });
                 });
             });
         });
-        
+
         imap.once('error', (err) => {
             clearTimeout(timeout);
             console.error('❌ IMAP error:', err.message);
-            
+
             if (err.message.includes('Invalid credentials') || err.message.includes('LOGIN failed')) {
                 reject(new Error('LOGIN failed - Invalid credentials or App Password required'));
             } else {
                 reject(err);
             }
         });
-        
+
         imap.once('end', () => {
             console.log('🔌 Connection closed');
             clearTimeout(timeout);
             resolve(foundEmail);
         });
-        
+
         imap.connect();
     });
 }
-
 /**
  * Health check
  */
